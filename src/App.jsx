@@ -26,8 +26,7 @@ import {
 } from "lucide-react";
 import "./App.css";
 
-const API = "http://localhost:5000/api";
-
+const API_URL = "https://dukaantrack-retail-business-tracker.onrender.com/api";
 function money(value) {
   return new Intl.NumberFormat("en-IN", {
     style: "currency",
@@ -987,7 +986,7 @@ function App() {
                 </p>
               </div>
             </section>
-            
+
             {/* DUKAANTRACK BUSINESS HEALTH SCORE */}
             {(() => {
               const weekSales = weeklyChartData.reduce(
@@ -1023,9 +1022,9 @@ function App() {
 
               const creditPoints = totalCredit > 0
                 ? Math.round(25 * Math.max(
-                    0,
-                    Math.min(1, totalPaid / totalCredit)
-                  ))
+                  0,
+                  Math.min(1, totalPaid / totalCredit)
+                ))
                 : 18;
 
               const performancePoints = weekSales + weekExpenses === 0
