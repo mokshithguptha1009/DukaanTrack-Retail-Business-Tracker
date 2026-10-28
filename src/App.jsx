@@ -26,7 +26,7 @@ import {
 } from "lucide-react";
 import "./App.css";
 
-const API_URL = "https://dukaantrack-retail-business-tracker.onrender.com/api";
+const API = "https://dukaantrack-retail-business-tracker.onrender.com/api";
 function money(value) {
   return new Intl.NumberFormat("en-IN", {
     style: "currency",
