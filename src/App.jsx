@@ -82,6 +82,9 @@ function App() {
   const [search, setSearch] = useState("");
   const [typeFilter, setTypeFilter] = useState("all");
   const [paymentFilter, setPaymentFilter] = useState("all");
+  const [bankPreview, setBankPreview] = useState([]);
+  const [bankFileName, setBankFileName] = useState("");
+  const [bankImportLoading, setBankImportLoading] = useState(false);
   const [startDate, setStartDate] = useState("");
   const [endDate, setEndDate] = useState("");
 
@@ -207,6 +210,68 @@ function App() {
     }
     if (!response.ok) throw new Error(result.message || "The request failed.");
     return result;
+  }
+  async function previewBankCSV(file) {
+    if (!file) return;
+
+    setError("");
+    setMessage("");
+    setBankPreview([]);
+    setBankFileName(file.name);
+    setBankImportLoading(true);
+
+    try {
+      if (!file.name.toLowerCase().endsWith(".csv")) {
+        throw new Error("Please choose a CSV bank statement.");
+      }
+
+      const csvText = await file.text();
+
+      const result = await apiRequest("/bank-import/preview", {
+        method: "POST",
+        body: JSON.stringify({ csvText })
+      });
+
+      setBankPreview(result.rows || []);
+      setMessage(`${result.total || 0} transactions ready for review.`);
+    } catch (err) {
+      setError(err.message || "Could not read bank statement.");
+    } finally {
+      setBankImportLoading(false);
+    }
+  }
+
+  async function confirmBankImport() {
+    const rows = bankPreview.filter(row => !row.alreadyImported);
+
+    if (!rows.length) {
+      setError("No new transactions to import.");
+      return;
+    }
+
+    if (!window.confirm(`Import ${rows.length} transactions into DukaanTrack?`)) {
+      return;
+    }
+
+    setBankImportLoading(true);
+    setError("");
+    setMessage("");
+
+    try {
+      const result = await apiRequest("/bank-import/confirm", {
+        method: "POST",
+        body: JSON.stringify({ rows })
+      });
+
+      setMessage(result.message || "Import completed.");
+      setBankPreview([]);
+      setBankFileName("");
+      await loadData(false);
+    } catch (err) {
+      setError(err.message || "Import failed.");
+    } finally {
+      setBankImportLoading(false);
+    }
   }
 
   async function loadNotes() {
@@ -551,7 +616,8 @@ function App() {
     { name: "Debtor Tracker", icon: Users },
     { name: "Reports", icon: Receipt },
     { name: "Owner Notepad", icon: NotebookPen },
-    { name: "Cheque & Bank Tracker", icon: Landmark }
+    { name: "Cheque & Bank Tracker", icon: Landmark },
+    { name: "Bank Import", icon: FileText },
   ];
 
   const cards = [
@@ -695,7 +761,99 @@ function App() {
             <p className="muted">
               {page === "Dashboard" && "Track your daily business performance."}
               {page === "Sales & Expenses" && "Search, filter and manage your saved transactions."}
+              {page === "Bank Import" && (
+                <section className="panel transactions-panel">
+                  <div className="panel-heading">
+                    <div>
+                      <h2>Bank Statement Import</h2>
+                      <p className="muted">
+                        Upload a bank CSV, review the transactions, and import new records.
+                      </p>
+                    </div>
+                    <Landmark size={24} />
+                  </div>
 
+                  <label htmlFor="bank-csv">Choose bank statement (.csv)</label>
+                  <input
+                    id="bank-csv"
+                    type="file"
+                    accept=".csv,text/csv"
+                    onChange={event => previewBankCSV(event.target.files?.[0])}
+                    disabled={bankImportLoading}
+                  />
+
+                  {bankFileName && (
+                    <p className="muted">Selected file: {bankFileName}</p>
+                  )}
+
+                  {bankImportLoading && <p>Processing statement...</p>}
+
+                  {bankPreview.length > 0 && (
+                    <>
+                      <p className="note">
+                        Check each transaction carefully. Credits are suggested as sales
+                        and debits as expenses; bank transfers are not necessarily shop sales.
+                        Already imported rows are skipped.
+                      </p>
+
+                      <div className="table-wrap">
+                        <table>
+                          <thead>
+                            <tr>
+                              <th>Date</th>
+                              <th>Description</th>
+                              <th>Suggested type</th>
+                              <th>Amount</th>
+                              <th>Status</th>
+                            </tr>
+                          </thead>
+                          <tbody>
+                            {bankPreview.map((row, index) => (
+                              <tr key={row.fingerprint || index}>
+                                <td>{new Date(row.date).toLocaleDateString("en-IN")}</td>
+                                <td>{row.description}</td>
+                                <td>
+                                  <select
+                                    value={row.type}
+                                    disabled={row.alreadyImported}
+                                    onChange={event =>
+                                      setBankPreview(previous =>
+                                        previous.map((item, i) =>
+                                          i === index
+                                            ? { ...item, type: event.target.value }
+                                            : item
+                                        )
+                                      )
+                                    }
+                                  >
+                                    <option value="sale">Sale / credit</option>
+                                    <option value="expense">Expense / debit</option>
+                                  </select>
+                                </td>
+                                <td>{money(row.amount)}</td>
+                                <td>
+                                  {row.alreadyImported ? "Already imported" : "New"}
+                                </td>
+                              </tr>
+                            ))}
+                          </tbody>
+                        </table>
+                      </div>
+
+                      <button
+                        type="button"
+                        className="primary-button"
+                        onClick={confirmBankImport}
+                        disabled={bankImportLoading ||
+                          !bankPreview.some(row => !row.alreadyImported)}
+                        style={{ marginTop: 16 }}
+                      >
+                        Import new transactions
+                      </button>
+                    </>
+                  )}
+                </section>
+              )}
               {page === "Debtor Tracker" && (
                 <>
                   <section className="content-grid">

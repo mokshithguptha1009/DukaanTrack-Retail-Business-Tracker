@@ -2,6 +2,7 @@ require("dotenv").config();
 
 const express = require("express");
 const mongoose = require("mongoose");
+const { parse } = require("csv-parse/sync");
 const cors = require("cors");
 const bcrypt = require("bcryptjs");
 const jwt = require("jsonwebtoken");
@@ -330,11 +331,185 @@ app.get("/api/transactions", requireOwner, async (req, res) => {
 app.post("/api/transactions", requireOwner, async (req, res) => {
     try {
         const transaction = await Transaction.create(req.body);
-
+        const BankImport = mongoose.model(
+            "BankImport",
+            new mongoose.Schema({
+                fingerprint: { type: String, unique: true, required: true },
+                importedAt: { type: Date, default: Date.now }
+            })
+        );
         res.status(201).json(transaction);
     } catch (error) {
         res.status(400).json({
             message: error.message || "Could not create transaction."
+        });
+    }
+});
+// Preview a bank statement CSV before importing
+app.post("/api/bank-import/preview", requireOwner, async (req, res) => {
+    try {
+        const csvText = req.body.csvText;
+
+        if (!csvText || typeof csvText !== "string") {
+            return res.status(400).json({ message: "Please provide CSV text." });
+        }
+
+        const records = parse(csvText, {
+            columns: true,
+            skip_empty_lines: true,
+            bom: true,
+            trim: true
+        });
+
+        const getValue = (row, names) => {
+            const key = Object.keys(row).find(k =>
+                names.includes(k.toLowerCase().replace(/[^a-z]/g, ""))
+            );
+            return key ? String(row[key] ?? "").trim() : "";
+        };
+
+        const rows = [];
+
+        for (const row of records) {
+            const dateText = getValue(row, [
+                "date", "transactiondate", "valuedate", "postdate"
+            ]);
+
+            const description = getValue(row, [
+                "description", "narration", "remarks", "details",
+                "transactiondetails", "particulars"
+            ]) || "Bank statement transaction";
+
+            const debitText = getValue(row, [
+                "debit", "withdrawal", "withdrawals", "moneyout"
+            ]);
+
+            const creditText = getValue(row, [
+                "credit", "deposit", "deposits", "moneyin"
+            ]);
+
+            const amountText = getValue(row, [
+                "amount", "transactionamount"
+            ]);
+
+            const cleanAmount = value =>
+                Number(String(value).replace(/[₹,\s]/g, "").replace(/[()]/g, "-"));
+
+            let amount;
+            let type;
+
+            if (debitText && cleanAmount(debitText) !== 0) {
+                amount = Math.abs(cleanAmount(debitText));
+                type = "expense";
+            } else if (creditText && cleanAmount(creditText) !== 0) {
+                amount = Math.abs(cleanAmount(creditText));
+                type = "sale";
+            } else if (amountText && cleanAmount(amountText) !== 0) {
+                amount = Math.abs(cleanAmount(amountText));
+                const direction = getValue(row, ["type", "transactiontype", "drcr"]).toLowerCase();
+
+                if (direction.includes("debit") || direction === "dr") {
+                    type = "expense";
+                } else if (direction.includes("credit") || direction === "cr") {
+                    type = "sale";
+                } else {
+                    continue;
+                }
+            } else {
+                continue;
+            }
+
+            const date = new Date(dateText);
+            if (!Number.isFinite(date.getTime()) || !Number.isFinite(amount) || amount <= 0) {
+                continue;
+            }
+
+            const fingerprint = require("crypto")
+                .createHash("sha256")
+                .update(`${date.toISOString().slice(0, 10)}|${type}|${amount.toFixed(2)}|${description.toLowerCase()}`)
+                .digest("hex");
+
+            const alreadyImported = await BankImport.exists({ fingerprint });
+
+            rows.push({
+                date: date.toISOString(),
+                description,
+                amount,
+                type,
+                fingerprint,
+                alreadyImported: Boolean(alreadyImported)
+            });
+        }
+
+        res.json({
+            total: rows.length,
+            rows,
+            message: "Review these transactions before importing."
+        });
+    } catch (error) {
+        res.status(400).json({
+            message: error.message || "Could not read this CSV."
+        });
+    }
+});
+
+
+// Save reviewed bank statement transactions
+app.post("/api/bank-import/confirm", requireOwner, async (req, res) => {
+    try {
+        const rows = req.body.rows;
+
+        if (!Array.isArray(rows) || rows.length === 0) {
+            return res.status(400).json({ message: "No transactions selected." });
+        }
+
+        let imported = 0;
+        let skipped = 0;
+
+        for (const row of rows) {
+            if (
+                !row.fingerprint ||
+                !["sale", "expense"].includes(row.type) ||
+                !Number.isFinite(Number(row.amount)) ||
+                Number(row.amount) <= 0 ||
+                !Number.isFinite(new Date(row.date).getTime())
+            ) {
+                skipped++;
+                continue;
+            }
+
+            if (await BankImport.exists({ fingerprint: row.fingerprint })) {
+                skipped++;
+                continue;
+            }
+
+            try {
+                await Transaction.create({
+                    type: row.type,
+                    amount: Number(row.amount),
+                    paymentMethod: /upi|phonepe|paytm|gpay|google pay/i.test(row.description)
+                        ? "upi"
+                        : "other",
+                    note: `Bank import: ${String(row.description).slice(0, 300)}`,
+                    date: new Date(row.date)
+                });
+
+                await BankImport.create({ fingerprint: row.fingerprint });
+                imported++;
+            } catch (error) {
+                // If saving fails, do not count this row as imported.
+                skipped++;
+            }
+        }
+
+        res.json({
+            message: `Imported ${imported} transactions; skipped ${skipped}.`,
+            imported,
+            skipped
+        });
+    } catch (error) {
+        res.status(500).json({
+            message: error.message || "Import failed."
         });
     }
 });
